@@ -1,0 +1,529 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BRANCH="pos-scaffold"
+echo "Creando rama $BRANCH (local) ..."
+git checkout -b "$BRANCH"
+
+echo "Escribiendo archivos del scaffold..."
+
+mkdir -p pages api pages/api components lib styles db .github/workflows
+
+cat > package.json <<'EOF'
+{
+  "name": "recargasfree-pos",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint . --ext .ts,.tsx"
+  },
+  "dependencies": {
+    "next": "13.5.6",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "@supabase/supabase-js": "2.28.0",
+    "clsx": "1.2.1",
+    "pdfkit": "0.13.0"
+  },
+  "devDependencies": {
+    "typescript": "5.1.6",
+    "tailwindcss": "3.5.4",
+    "postcss": "8.4.27",
+    "autoprefixer": "10.4.14",
+    "eslint": "8.48.0",
+    "eslint-config-next": "13.5.6"
+  }
+}
+EOF
+
+cat > tsconfig.json <<'EOF'
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "Node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules"]
+}
+EOF
+
+cat > tailwind.config.js <<'EOF'
+module.exports = {
+  content: ["./pages/**/*.{js,ts,jsx,tsx}", "./components/**/*.{js,ts,jsx,tsx}"],
+  theme: {
+    extend: {
+      colors: {
+        primary: '#1E88E5',
+        emerald: '#10B981'
+      }
+    }
+  },
+  plugins: []
+}
+EOF
+
+cat > postcss.config.js <<'EOF'
+module.exports = {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {}
+  }
+}
+EOF
+
+mkdir -p pages/api
+cat > pages/_app.tsx <<'EOF'
+import '../styles/globals.css';
+import type { AppProps } from 'next/app';
+
+export default function App({ Component, pageProps }: AppProps) {
+  return <Component {...pageProps} />;
+}
+EOF
+
+cat > styles/globals.css <<'EOF'
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #__next {
+  height: 100%;
+}
+body {
+  background-color: #f7fafc;
+  color: #0f172a;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+}
+EOF
+
+mkdir -p lib
+cat > lib/supabaseClient.ts <<'EOF'
+import { createBrowserSupabaseClient } from '@supabase/auth-helpers-nextjs';
+import { SupabaseClient } from '@supabase/supabase-js';
+
+let supabase: SupabaseClient | null = null;
+
+export function getSupabaseClient() {
+  if (!supabase) {
+    supabase = createBrowserSupabaseClient({
+      supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL as string,
+      supabaseKey: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY as string
+    } as any);
+  }
+  return supabase;
+}
+EOF
+
+cat > components/PosCart.tsx <<'EOF'
+import React, { useState, useEffect } from 'react';
+
+type Product = {
+  id: string;
+  name: string;
+  priceSell: number;
+  stock: number;
+};
+
+export default function PosCart() {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Product[]>([]);
+  const [cart, setCart] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!query) return setResults([]);
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/products?q=${encodeURIComponent(query)}&limit=8`);
+        const json = await res.json();
+        setResults(json || []);
+      } catch (e) {
+        console.error(e);
+      }
+    }, 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  function addProduct(p: Product) {
+    setCart(prev => {
+      const found = prev.find((x: any) => x.productId === p.id);
+      if (found) return prev.map((x: any) => x.productId === p.id ? { ...x, quantity: x.quantity + 1 } : x);
+      return [...prev, { productId: p.id, name: p.name, unitPrice: p.priceSell, quantity: 1 }];
+    });
+  }
+
+  function calcTotals() {
+    const subtotal = cart.reduce((s, it) => s + it.unitPrice * it.quantity, 0);
+    const tax = parseFloat((subtotal * 0.12).toFixed(2));
+    return { subtotal, tax, total: subtotal + tax };
+  }
+
+  async function checkout() {
+    const payload = { items: cart.map(c => ({ productId: c.productId, quantity: c.quantity })), payments: [{ method: 'CASH', amount: calcTotals().total }] };
+    const res = await fetch('/api/checkout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const json = await res.json();
+    if (res.ok) {
+      alert('Venta registrada: ' + json.sale?.id);
+      setCart([]);
+    } else {
+      alert('Error: ' + json.error);
+    }
+  }
+
+  const totals = calcTotals();
+
+  return (
+    <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="md:col-span-2">
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Buscar o escanear código" className="w-full p-3 rounded border" />
+        <ul className="mt-3 space-y-2">
+          {results.map(r => (
+            <li key={r.id} className="p-3 border rounded flex justify-between items-center">
+              <div>
+                <div className="font-medium">{r.name}</div>
+                <div className="text-sm text-gray-500">Stock: {r.stock}</div>
+              </div>
+              <div className="flex gap-2">
+                <div className="text-right">${r.priceSell.toFixed(2)}</div>
+                <button onClick={() => addProduct(r)} className="ml-3 bg-primary text-white px-3 py-1 rounded">Agregar</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="bg-white p-4 rounded shadow">
+        <h3 className="font-semibold">Carrito</h3>
+        <div className="mt-2 space-y-2 max-h-64 overflow-auto">
+          {cart.map(it => (
+            <div key={it.productId} className="flex justify-between">
+              <div>{it.name} × {it.quantity}</div>
+              <div>${(it.unitPrice * it.quantity).toFixed(2)}</div>
+            </div>
+          ))}
+        </div>
+        <div className="border-t mt-3 pt-3">
+          <div className="flex justify-between"><span>Subtotal</span><span>${totals.subtotal.toFixed(2)}</span></div>
+          <div className="flex justify-between"><span>IVA (12%)</span><span>${totals.tax.toFixed(2)}</span></div>
+          <div className="flex justify-between font-bold"><span>Total</span><span>${totals.total.toFixed(2)}</span></div>
+          <button onClick={checkout} className="mt-3 w-full bg-emerald text-white py-2 rounded">Pagar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+EOF
+
+cat > pages/index.tsx <<'EOF'
+import PosCart from '../components/PosCart';
+
+export default function Home() {
+  return (
+    <main className="min-h-screen p-6">
+      <header className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">RecargasFree - POS</h1>
+        <div className="text-sm text-gray-600">Usuario: Demo</div>
+      </header>
+
+      <section>
+        <PosCart />
+      </section>
+    </main>
+  );
+}
+EOF
+
+cat > pages/api/checkout.ts <<'EOF'
+import type { NextApiRequest, NextApiResponse } from 'next';
+import { createClient } from '@supabase/supabase-js';
+
+const SUPABASE_URL = process.env.SUPABASE_URL as string;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+
+const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') return res.status(405).end();
+  const { items, payments, registerId } = req.body;
+  if (!items || items.length === 0) return res.status(400).json({ error: 'No items provided' });
+
+  try {
+    let subtotal = 0;
+    let tax = 0;
+
+    for (const it of items) {
+      const { data: product } = await supabaseAdmin.from('products').select('*').eq('id', it.productId).single();
+      if (!product) throw new Error('Product not found: ' + it.productId);
+      if (product.stock < it.quantity) throw new Error('Insufficient stock for ' + product.name);
+      subtotal += parseFloat(product.price_sell) * it.quantity;
+      tax += parseFloat(product.price_sell) * it.quantity * (product.tax_percent ?? 0) / 100;
+    }
+
+    const total = subtotal + tax;
+
+    const { data: sale } = await supabaseAdmin.from('sales').insert([{ user_id: null, register_id: registerId, subtotal, tax_amount: tax, total_amount: total }]).select().single();
+
+    for (const it of items) {
+      await supabaseAdmin.from('sale_items').insert([{ sale_id: sale.id, product_id: it.productId, quantity: it.quantity, unit_price: it.unitPrice ?? 0 }]);
+      await supabaseAdmin.rpc('decrement_stock', { p_product_id: it.productId, p_qty: it.quantity });
+    }
+
+    if (payments && payments.length) {
+      for (const p of payments) {
+        await supabaseAdmin.from('payments').insert([{ sale_id: sale.id, method: p.method, amount: p.amount, reference: p.reference || null }]);
+      }
+    }
+
+    res.status(200).json({ sale });
+  } catch (err: any) {
+    console.error(err);
+    res.status(400).json({ error: err.message || 'Error processing sale' });
+  }
+}
+EOF
+
+cat > pages/api/invoice/generate.ts <<'EOF'
+import type { NextApiRequest, NextApiResponse } from 'next';
+import PDFDocument from 'pdfkit';
+import { createClient } from '@supabase/supabase-js';
+import stream from 'stream';
+
+const SUPABASE_URL = process.env.SUPABASE_URL as string;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
+const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  if (req.method !== 'POST') return res.status(405).end();
+  const { saleId } = req.body;
+  if (!saleId) return res.status(400).json({ error: 'Missing saleId' });
+
+  try {
+    const { data: sale } = await supabaseAdmin.from('sales').select('*, items: sale_items(*), payments(*)').eq('id', saleId).single();
+    if (!sale) return res.status(404).json({ error: 'Sale not found' });
+
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const passThrough = new stream.PassThrough();
+    doc.pipe(passThrough);
+
+    doc.fontSize(16).text('RecargasFree - Factura', { align: 'center' });
+    doc.moveDown();
+    doc.text(\`Venta: \${sale.id}\`);
+    doc.text(\`Fecha: \${new Date(sale.created_at).toLocaleString()}\`);
+    doc.moveDown();
+
+    (sale.items || []).forEach((it: any) => {
+      doc.text(\`\${it.quantity} x \${it.unit_price.toFixed(2)}  \${ (it.quantity * it.unit_price).toFixed(2) }\`);
+    });
+
+    doc.moveDown();
+    doc.text(\`Subtotal: \${sale.subtotal.toFixed(2)}\`);
+    doc.text(\`IVA: \${sale.tax_amount.toFixed(2)}\`);
+    doc.text(\`Total: \${sale.total_amount.toFixed(2)}\`);
+    doc.end();
+
+    const buffers: Buffer[] = [];
+    passThrough.on('data', chunk => buffers.push(Buffer.from(chunk)));
+    passThrough.on('end', async () => {
+      const fileBuffer = Buffer.concat(buffers);
+      const fileName = \`invoices/\${saleId}.pdf\`;
+      const { data, error } = await supabaseAdmin.storage.from('invoices').upload(fileName, fileBuffer, { contentType: 'application/pdf', upsert: true });
+      if (error) throw error;
+      const { publicUrl } = supabaseAdmin.storage.from('invoices').getPublicUrl(fileName);
+      await supabaseAdmin.from('invoices').insert([{ sale_id: saleId, invoice_number: \`INV-\${saleId}\`, pdf_url: publicUrl }]);
+      res.status(200).json({ url: publicUrl });
+    });
+
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err.message || 'Error generating invoice' });
+  }
+}
+EOF
+
+cat > db/schema.sql <<'EOF'
+-- Schema SQL for Supabase / Postgres
+
+-- Users table (Supabase provides auth; this is optional for profile extension)
+CREATE TABLE IF NOT EXISTS users_profiles (
+  id uuid PRIMARY KEY,
+  email text UNIQUE,
+  name text,
+  role text DEFAULT 'CASHIER',
+  created_at timestamptz DEFAULT now()
+);
+
+-- Products
+CREATE TABLE IF NOT EXISTS products (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sku text UNIQUE,
+  name text NOT NULL,
+  description text,
+  price_sell numeric(12,2) NOT NULL DEFAULT 0,
+  price_cost numeric(12,2) DEFAULT 0,
+  tax_percent numeric(5,2) DEFAULT 0,
+  stock integer DEFAULT 0,
+  stock_min integer DEFAULT 0,
+  barcode text UNIQUE,
+  image_url text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Sales
+CREATE TABLE IF NOT EXISTS sales (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid,
+  register_id uuid,
+  subtotal numeric(12,2) DEFAULT 0,
+  tax_amount numeric(12,2) DEFAULT 0,
+  discount numeric(12,2) DEFAULT 0,
+  total_amount numeric(12,2) DEFAULT 0,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Sale items
+CREATE TABLE IF NOT EXISTS sale_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid REFERENCES sales(id) ON DELETE CASCADE,
+  product_id uuid REFERENCES products(id),
+  quantity integer NOT NULL,
+  unit_price numeric(12,2) NOT NULL,
+  total_line numeric(12,2) NOT NULL
+);
+
+-- Payments
+CREATE TABLE IF NOT EXISTS payments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid REFERENCES sales(id) ON DELETE CASCADE,
+  method text,
+  amount numeric(12,2),
+  reference text
+);
+
+-- Invoices
+CREATE TABLE IF NOT EXISTS invoices (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  sale_id uuid UNIQUE REFERENCES sales(id),
+  invoice_number text UNIQUE,
+  pdf_url text,
+  created_at timestamptz DEFAULT now()
+);
+
+-- Helper RPC to decrement stock safely (uses FOR UPDATE)
+CREATE OR REPLACE FUNCTION decrement_stock(p_product_id uuid, p_qty integer) RETURNS void AS $$
+BEGIN
+  UPDATE products SET stock = stock - p_qty WHERE id = p_product_id;
+END;
+$$ LANGUAGE plpgsql VOLATILE;
+EOF
+
+cat > .env.example <<'EOF'
+# Client (public)
+NEXT_PUBLIC_SUPABASE_URL=YOUR_SUPABASE_URL
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+
+# Server (secret)
+SUPABASE_SERVICE_ROLE_KEY=YOUR_SUPABASE_SERVICE_ROLE_KEY
+SUPABASE_URL=YOUR_SUPABASE_URL
+
+# App
+NEXT_PUBLIC_APP_NAME=RecargasFree-POS
+
+# Optional storage / S3
+# S3_ENDPOINT=
+# S3_KEY=
+# S3_SECRET=
+EOF
+
+cat > Dockerfile <<'EOF'
+# Dockerfile for Next.js app (production)
+
+FROM node:18-alpine AS builder
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci --production=false
+COPY . .
+RUN npm run build
+
+FROM node:18-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/public ./public
+COPY --from=builder /app/.next ./.next
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+EXPOSE 3000
+CMD ["npm","start"]
+EOF
+
+cat > .github/workflows/ci.yml <<'EOF'
+name: CI
+
+on:
+  push:
+    branches: ["pos-scaffold"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+      - name: Install
+        run: npm ci
+      - name: Lint
+        run: npm run lint || true
+      - name: Build
+        run: npm run build
+EOF
+
+cat > README.md <<'EOF'
+# RecargasFree - POS scaffold
+
+Este branch (pos-scaffold) contiene un scaffold inicial para una aplicación POS basada en Next.js + Tailwind y Supabase.
+
+Instrucciones rápidas:
+1. Crear un proyecto en Supabase y ejecutar el SQL en db/schema.sql en la sección SQL editor.
+2. Añadir un bucket llamado "invoices" en Supabase Storage.
+3. Copiar .env.example → .env.local y completar las variables
+4. npm install
+5. npm run dev
+
+Notas de seguridad:
+- Mantén SUPABASE_SERVICE_ROLE_KEY en GitHub Secrets y NUNCA lo expongas al cliente.
+- Implementa la lógica de checkout en una función SQL (RPC) para atomicidad en producción.
+- Integra Stripe o pasarela para pagos con tarjeta; no almacenar datos de tarjeta aquí.
+EOF
+
+echo "Agregando y haciendo commit..."
+git add .
+git commit -m "feat(pos-scaffold): initial POS scaffold (Next.js + Supabase)"
+
+echo "Intentando hacer push de la rama $BRANCH al remoto origin..."
+if git remote get-url origin >/dev/null 2>&1; then
+  if git push -u origin "$BRANCH"; then
+    echo "Push exitoso a origin/$BRANCH"
+  else
+    echo "No se pudo empujar al remoto (posible falta de permisos). Puedes ejecutar: git push origin $BRANCH desde tu cuenta con permisos."
+  fi
+else
+  echo "No hay remoto origin configurado. Agrega el remoto y empuja manualmente."
+fi
+
+echo "Hecho. Si quieres, dime y abro el Pull Request (requiere push exitoso)."
